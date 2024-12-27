@@ -26,3 +26,8 @@ If you are into this kind of thing, this is 7th in a series of these puzzles.
 * https://github.com/srush/transformer-puzzles
 * https://github.com/srush/GPTworld
 * https://github.com/srush/LLM-Training-Puzzles
+
+```bash
+apt install libcairo2 libcairo2-dev
+conda create -n triton python=3.10 pytorch pytorch-cuda=12.1 torchvision torchaudio ipykernel ipywidgets cairo pycairo -c pytorch -c conda-forge -c nvidia
+```
