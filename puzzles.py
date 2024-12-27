@@ -308,7 +308,8 @@ def add_vec_kernel(x_ptr, y_ptr, z_ptr, N0, N1, B0: tl.constexpr, B1: tl.constex
     x = tl.load(x_ptr + offset_x, mask=mask_x, other=0.0)
     y = tl.load(y_ptr + offset_y, mask=mask_y, other=0.0)
     z = x[None, :] + y[:, None]
-    offset_z = offset_x[None, :] + offset_y[:, None] * N0
+    # z shape is [N1, N0]
+    offset_z = offset_y[:, None] * N0 + offset_x[None, :]
     tl.store(z_ptr + offset_z, z, mask=mask_x[None, :] & mask_y[:, None])
 
 
@@ -352,7 +353,10 @@ def add_vec_block_kernel(
     x = tl.load(x_ptr + offset_x, mask=mask_x, other=0.0)
     y = tl.load(y_ptr + offset_y, mask=mask_y, other=0.0)
 
+    # x shape is [1, N0], y shape is [N1, 1]
     z = x[None, :] + y[:, None]
+
+    # z shape is [N1, N0]
     offset_z = offset_x[None, :] + offset_y[:, None] * N0
     tl.store(z_ptr + offset_z, z, mask=mask_x[None, :] & mask_y[:, None])
 
@@ -404,9 +408,11 @@ def mul_relu_block_kernel(
     y = tl.load(y_ptr + offset_y, mask=mask_y, other=0.0)
 
     # 计算加和
+    # x shape is [1, N0], y shape is [N1, 1]
     z = tl.where(x[None, :] * y[:, None] >= 0, x[None, :] * y[:, None], 0)
 
     # 计算存储位置的偏移量
+    # z shape is [N1, N0]
     offset_z = offset_x[None, :] + offset_y[:, None] * N0
 
     # 存储结果
@@ -458,17 +464,18 @@ def mul_relu_block_back_kernel(
 
     offset_x = tl.arange(0, B0)
     offset_y = tl.arange(0, B1)
-    X = block_start_x * B0 + offset_x
-    Y = block_start_y * B1 + offset_y
+    index_i = block_start_x * B0 + offset_x
+    index_j = block_start_y * B1 + offset_y
 
-    mask_x = X < N0
-    mask_y = Y < N1
+    mask_x = index_i < N0
+    mask_y = index_j < N1
     mask = mask_x[None, :] & mask_y[:, None]
 
-    offsets = X[None, :] + Y[:, None] * N0
+    # z shape is [N1, N0]
+    offsets = index_i[None, :] + index_j[:, None] * N0
 
     x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
-    y = tl.load(y_ptr + Y, mask=mask_y, other=0.0)
+    y = tl.load(y_ptr + index_j, mask=mask_y, other=0.0)
     dz = tl.load(dz_ptr + offsets, mask=mask, other=0.0)
 
     z = x * y[:, None]
@@ -507,24 +514,22 @@ def sum_spec(x: Float32[Tensor, "4 200"]) -> Float32[Tensor, "4"]:
 
 @triton.jit
 def sum_kernel(x_ptr, z_ptr, N0, N1, T, B0: tl.constexpr, B1: tl.constexpr):
-    pid = tl.program_id(axis=0)
-    block_start = pid * B0
-    offsets = block_start + tl.arange(0, B0)
-    mask = offsets < N0
+
+    pid = tl.program_id(0)
+    index_i = pid * B0 + tl.arange(0, B0)
+    mask_i = index_i < N0
 
     z = tl.zeros([B0], dtype=tl.float32)
 
-    for i in tl.range(0, T, B1):
-        offsets_t = i + tl.arange(0, B1)
-        mask_t = offsets_t < T
-        x = tl.load(
-            x_ptr + offsets[:, None] * T + offsets_t[None, :],
-            mask=mask[:, None] & mask_t[None, :],
-            other=0.0,
-        )
+    for i in range(0, T, B1):
+        index_j = i + tl.arange(0, B1)
+        mask_j = index_j < T
+        # x shape is [B0, B1]
+        offset_x = index_i[:, None] * T + index_j[None, :]
+        x = tl.load(x_ptr + offset_x, mask=mask_j[None, :] & mask_i[:, None], other=0.0)
         z += tl.sum(x, axis=1)
 
-    tl.store(z_ptr + offsets, z, mask=mask)
+    tl.store(z_ptr + index_i, z, mask=mask_i)
 
 
 test(sum_kernel, sum_spec, B={"B0": 1, "B1": 32}, nelem={"N0": 4, "N1": 32, "T": 200})
@@ -828,7 +833,6 @@ def dot_kernel(
     B2: tl.constexpr,
     B_MID: tl.constexpr,
 ):
-
     # --- 1) 获取并计算三个程序ID ---
     pid_batch = tl.program_id(0)  # 对应 batch 维度 (N2)
     pid_m = tl.program_id(1)  # 对应行 维度 (N0)
